@@ -1054,7 +1054,7 @@ export default function RecordingSession() {
         {pendingRecording && !isUploading && (
           <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-lg max-w-2xl w-full p-6">
-              <h2 className="text-2xl font-bold mb-4">📹 Recording Complete!</h2>
+              <h2 className="text-2xl font-bold mb-4">Recording Complete!</h2>
               <p className="text-gray-700 mb-2">
                 Video recorded successfully ({Math.round(pendingRecording.blob.size / 1024 / 1024 * 100) / 100} MB)
               </p>
@@ -1093,7 +1093,7 @@ export default function RecordingSession() {
                   }}
                   className="px-6 py-3 bg-gray-500 hover:bg-gray-600 text-white rounded-lg font-medium transition-colors"
                 >
-                  🔄 Re-record
+                  Re-record
                 </button>
                 
                 <button
