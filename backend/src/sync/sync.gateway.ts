@@ -356,10 +356,10 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       const { sessionId } = payload;
       
-      // Broadcast to all other devices in session
-      client.to(sessionId).emit('confirm_upload');
+      // Broadcast to all devices in session (including the sender)
+      this.server.to(sessionId).emit('confirm_upload');
       
-      this.logger.log(`Desktop confirmed upload for session ${sessionId}`);
+      this.logger.log(`Upload confirmed for session ${sessionId}`);
     } catch (error) {
       this.logger.error(`Error confirming upload: ${error.message}`);
     }
@@ -373,23 +373,25 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       const { sessionId, recordingId } = payload;
       
-      // If recordingId is provided, delete all recordings for that posture+distance
+      // If recordingId is provided (should be sessionId), delete all recordings for current posture+distance
       if (recordingId) {
         const recording = await this.sessionService.getRecording(recordingId);
-        await this.sessionService.deleteRecordingsByPostureAndDistance(
-          recording.sessionId,
-          recording.postureLabel,
-          recording.distance,
-        );
-        this.logger.log(
-          `Deleted recordings for ${recording.postureLabel} at ${recording.distance} distance`,
-        );
+        if (recording) {
+          await this.sessionService.deleteRecordingsByPostureAndDistance(
+            recording.sessionId,
+            recording.postureLabel,
+            recording.distance,
+          );
+          this.logger.log(
+            `Deleted recordings for ${recording.postureLabel} at ${recording.distance} distance`,
+          );
+        }
       }
       
-      // Broadcast to all other devices in session
-      client.to(sessionId).emit('confirm_rerecord');
+      // Broadcast to all devices in session (including the sender)
+      this.server.to(sessionId).emit('confirm_rerecord');
       
-      this.logger.log(`Desktop requested re-record for session ${sessionId}`);
+      this.logger.log(`Re-record confirmed for session ${sessionId}`);
     } catch (error) {
       this.logger.error(`Error confirming re-record: ${error.message}`);
     }

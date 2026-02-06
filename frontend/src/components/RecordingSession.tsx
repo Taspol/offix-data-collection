@@ -526,9 +526,9 @@ export default function RecordingSession() {
         const recordingData: RecordingData = await stopRecording();
         addDebug(`✅ Stopped: ${recordingData.blob.size} bytes`);
         setRecording(false);
-        setMessage('Recording complete! Review and choose action.');
+        setMessage('Recording complete! Choose action.');
 
-        // Store recording for user confirmation
+        // Store recording for user confirmation - BOTH devices get the dialog
         setPendingRecording(recordingData);
         pendingRecordingRef.current = recordingData;
       } catch (err) {
@@ -545,94 +545,72 @@ export default function RecordingSession() {
       setMessage(data.step ? `Next: ${data.step.displayName}` : 'All steps completed!');
     });
 
-    // Listen for desktop confirmation to upload
+    // Listen for confirmation to upload from any device
     socket.on('confirm_upload', async () => {
-      addDebug('✅ Desktop confirmed upload');
+      addDebug('✅ Upload confirmed');
       const recording = pendingRecordingRef.current;
-      if (!recording) {
-        addDebug('❌ No pending recording!');
-        setMessage('Error: No recording found');
-        return;
-      }
-      
-      addDebug(`📦 Recording: ${recording.blob.size} bytes`);
-      setMessage('Uploading...');
-      
-      try {
-        // Get recording ID and metadata
-        const recordingId = recordingIdRef.current;
-        if (!recordingId) {
-          throw new Error('No recording ID found');
-        }
-
-        addDebug(`📤 Upload ${recordingId.slice(0, 8)}...`);
-        setUploading(true);
-
-        // Stage 1: Get upload URL
-        addDebug('🔄 Stage 1: Getting URL...');
-        const uploadUrlData = await api.getUploadUrl(
-          sessionId!,
-          recordingId,
-          deviceType || 'desktop',
-          viewType || 'front',
-          currentStepRef.current?.postureLabel || 'unknown',
-        );
-        addDebug(`✅ Stage 1 done: ${uploadUrlData.storagePath}`);
-
-        // Stage 2: Upload the video
-        addDebug(`🔄 Stage 2: Uploading ${recording.blob.size} bytes...`);
-        await api.uploadVideo(
-          uploadUrlData.uploadUrl,
-          recording.blob,
-          uploadUrlData.storagePath,
-        );
-        addDebug(`✅ Stage 2 done: Video uploaded`);
-
-        // Stage 3: Complete the upload
-        addDebug('🔄 Stage 3: Completing...');
-        await api.completeUpload(recordingId, {
-          stopTimestamp: recording.stopTimestamp,
-          durationMs: recording.durationMs,
-          fileSizeBytes: recording.blob.size,
-        });
-        addDebug(`✅ Stage 3 done: Complete`);
-
-        // Notify backend and desktop that upload is complete
-        const socket = getSocket();
-        socket.emit('upload_completed', {
-          recordingId,
-          fileSizeBytes: recording.blob.size,
-        });
-        
-        // Notify desktop specifically (mobile uploads first)
-        socket.emit('mobile_upload_completed', {
-          recordingId,
-          fileSizeBytes: recording.blob.size,
-        });
-
-        setPendingRecording(null);
-        pendingRecordingRef.current = null;
-        setMessage('Upload successful!');
-      } catch (err) {
-        let errMsg = 'Upload failed';
-        if (err instanceof Error) {
-          errMsg = err.message;
-          addDebug(`❌ Error details: ${err.message}`);
-          if (err.stack) {
-            console.error('Stack:', err.stack);
+      if (recording) {
+        setMessage('Uploading...');
+        try {
+          // Use the recording ID that was provided in start_recording event
+          const recordingId = recordingIdRef.current;
+          if (!recordingId) {
+            throw new Error('No recording ID found');
           }
+
+          addDebug(`📤 Starting upload for ${recordingId.slice(0, 8)}...`);
+          setUploading(true);
+
+          // Stage 1: Get upload URL
+          const uploadUrlData = await api.getUploadUrl(
+            sessionId!,
+            recordingId,
+            deviceType || 'desktop',
+            viewType || 'front',
+            currentStepRef.current?.postureLabel || 'unknown',
+          );
+          addDebug(`✅ Got upload URL: ${uploadUrlData.storagePath}`);
+
+          // Stage 2: Upload the video
+          await api.uploadVideo(
+            uploadUrlData.uploadUrl,
+            recording.blob,
+            uploadUrlData.storagePath,
+          );
+          addDebug(`✅ Video uploaded`);
+
+          // Stage 3: Complete the upload
+          await api.completeUpload(recordingId, {
+            stopTimestamp: recording.stopTimestamp,
+            durationMs: recording.durationMs,
+            fileSizeBytes: recording.blob.size,
+          });
+          addDebug(`✅ Upload complete`);
+
+          // Notify backend that upload is complete
+          const socket = getSocket();
+          socket.emit('upload_completed', {
+            recordingId,
+            fileSizeBytes: recording.blob.size,
+          });
+
+          setPendingRecording(null);
+          pendingRecordingRef.current = null;
+          setMessage('Upload successful!');
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : 'Upload failed';
+          addDebug(`❌ Upload error: ${errMsg}`);
+          setMessage(`Upload failed: ${errMsg}`);
+          console.error('Upload failed:', err);
+        } finally {
+          setUploading(false);
         }
-        addDebug(`❌ Upload error: ${errMsg}`);
-        setMessage(`Upload error: ${errMsg}`);
-        console.error('Full upload error:', err);
-      } finally {
-        setUploading(false);
       }
     });
 
-    // Listen for desktop confirmation to re-record
+    // Listen for confirmation to re-record from any device
     socket.on('confirm_rerecord', () => {
-      addDebug('🔄 Desktop requested re-record');
+      addDebug('🔄 Re-record requested');
       setPendingRecording(null);
       pendingRecordingRef.current = null;
       setMessage('Ready to re-record');
@@ -1072,8 +1050,8 @@ export default function RecordingSession() {
           </div>
         )}
 
-        {/* Upload Confirmation - Desktop Only */}
-        {pendingRecording && !isUploading && deviceType === 'desktop' && (
+        {/* Upload Confirmation - Both Devices */}
+        {pendingRecording && !isUploading && (
           <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-lg max-w-2xl w-full p-6">
               <h2 className="text-2xl font-bold mb-4">📹 Recording Complete!</h2>
@@ -1094,16 +1072,17 @@ export default function RecordingSession() {
                 <button
                   onClick={async () => {
                     console.log('🔄 Re-recording...');
+                    
                     const oldRecordingId = recordingIdRef.current;
                     
                     setPendingRecording(null);
                     pendingRecordingRef.current = null;
                     setMessage('Ready to re-record');
-                    // Clear the recording ID so a new one will be created
+                    // Clear the recording ID
                     recordingIdRef.current = null;
                     setCurrentRecordingId(null);
                     
-                    // Broadcast to all devices (including this one)
+                    // Broadcast to all devices
                     const socket = getSocket();
                     if (socket && sessionId) {
                       socket.emit('confirm_rerecord', { 
@@ -1114,43 +1093,18 @@ export default function RecordingSession() {
                   }}
                   className="px-6 py-3 bg-gray-500 hover:bg-gray-600 text-white rounded-lg font-medium transition-colors"
                 >
-                  Re-record
+                  🔄 Re-record
                 </button>
                 
                 <button
                   onClick={async () => {
-                    console.log('Uploading...');
-                    setMessage('Uploading mobile first...');
+                    console.log('✓ Uploading...');
+                    setMessage('Uploading...');
                     
-                    // Emit to mobile device to upload first
+                    // Broadcast to all devices to start uploading
                     const socket = getSocket();
                     if (socket && sessionId) {
                       socket.emit('confirm_upload', { sessionId });
-                      
-                      // Wait for mobile to complete upload
-                      socket.once('mobile_upload_completed', async () => {
-                        addDebug('✅ Mobile upload done, uploading desktop...');
-                        setMessage('Uploading desktop...');
-                        
-                        // Now upload desktop recording
-                        try {
-                          await uploadVideo(pendingRecording);
-                          setPendingRecording(null);
-                          pendingRecordingRef.current = null;
-                        } catch (err) {
-                          console.error('Upload failed:', err);
-                          // Keep pending recording so user can retry
-                        }
-                      });
-                    } else {
-                      // No mobile device, just upload desktop
-                      try {
-                        await uploadVideo(pendingRecording);
-                        setPendingRecording(null);
-                        pendingRecordingRef.current = null;
-                      } catch (err) {
-                        console.error('Upload failed:', err);
-                      }
                     }
                   }}
                   className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
@@ -1159,13 +1113,6 @@ export default function RecordingSession() {
                 </button>
               </div>
             </div>
-          </div>
-        )}
-        
-        {/* Mobile waiting message */}
-        {pendingRecording && deviceType === 'mobile' && (
-          <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-blue-500 text-white px-6 py-3 rounded-lg shadow-lg z-40">
-            Waiting for desktop to confirm...
           </div>
         )}
 
