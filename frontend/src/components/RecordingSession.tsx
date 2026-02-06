@@ -549,68 +549,84 @@ export default function RecordingSession() {
     socket.on('confirm_upload', async () => {
       addDebug('✅ Desktop confirmed upload');
       const recording = pendingRecordingRef.current;
-      if (recording) {
-        setMessage('Uploading...');
-        try {
-          // Get recording ID and metadata
-          const recordingId = recordingIdRef.current;
-          if (!recordingId) {
-            throw new Error('No recording ID found');
-          }
-
-          addDebug(`📤 Starting upload for ${recordingId.slice(0, 8)}...`);
-          setUploading(true);
-
-          // Stage 1: Get upload URL
-          const uploadUrlData = await api.getUploadUrl(
-            sessionId!,
-            recordingId,
-            deviceType || 'desktop',
-            viewType || 'front',
-            currentStepRef.current?.postureLabel || 'unknown',
-          );
-          addDebug(`✅ Got upload URL: ${uploadUrlData.storagePath}`);
-
-          // Stage 2: Upload the video
-          await api.uploadVideo(
-            uploadUrlData.uploadUrl,
-            recording.blob,
-            uploadUrlData.storagePath,
-          );
-          addDebug(`✅ Video uploaded`);
-
-          // Stage 3: Complete the upload
-          await api.completeUpload(recordingId, {
-            stopTimestamp: recording.stopTimestamp,
-            durationMs: recording.durationMs,
-            fileSizeBytes: recording.blob.size,
-          });
-          addDebug(`✅ Upload complete`);
-
-          // Notify backend and desktop that upload is complete
-          const socket = getSocket();
-          socket.emit('upload_completed', {
-            recordingId,
-            fileSizeBytes: recording.blob.size,
-          });
-          
-          // Notify desktop specifically (mobile uploads first)
-          socket.emit('mobile_upload_completed', {
-            recordingId,
-            fileSizeBytes: recording.blob.size,
-          });
-
-          setPendingRecording(null);
-          pendingRecordingRef.current = null;
-          setMessage('Upload successful!');
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : 'Upload failed';
-          addDebug(`❌ Upload error: ${errMsg}`);
-          setMessage(`Upload failed: ${errMsg}`);
-          console.error('Upload failed:', err);
-        } finally {
-          setUploading(false);
+      if (!recording) {
+        addDebug('❌ No pending recording!');
+        setMessage('Error: No recording found');
+        return;
+      }
+      
+      addDebug(`📦 Recording: ${recording.blob.size} bytes`);
+      setMessage('Uploading...');
+      
+      try {
+        // Get recording ID and metadata
+        const recordingId = recordingIdRef.current;
+        if (!recordingId) {
+          throw new Error('No recording ID found');
         }
+
+        addDebug(`📤 Upload ${recordingId.slice(0, 8)}...`);
+        setUploading(true);
+
+        // Stage 1: Get upload URL
+        addDebug('🔄 Stage 1: Getting URL...');
+        const uploadUrlData = await api.getUploadUrl(
+          sessionId!,
+          recordingId,
+          deviceType || 'desktop',
+          viewType || 'front',
+          currentStepRef.current?.postureLabel || 'unknown',
+        );
+        addDebug(`✅ Stage 1 done: ${uploadUrlData.storagePath}`);
+
+        // Stage 2: Upload the video
+        addDebug(`🔄 Stage 2: Uploading ${recording.blob.size} bytes...`);
+        await api.uploadVideo(
+          uploadUrlData.uploadUrl,
+          recording.blob,
+          uploadUrlData.storagePath,
+        );
+        addDebug(`✅ Stage 2 done: Video uploaded`);
+
+        // Stage 3: Complete the upload
+        addDebug('🔄 Stage 3: Completing...');
+        await api.completeUpload(recordingId, {
+          stopTimestamp: recording.stopTimestamp,
+          durationMs: recording.durationMs,
+          fileSizeBytes: recording.blob.size,
+        });
+        addDebug(`✅ Stage 3 done: Complete`);
+
+        // Notify backend and desktop that upload is complete
+        const socket = getSocket();
+        socket.emit('upload_completed', {
+          recordingId,
+          fileSizeBytes: recording.blob.size,
+        });
+        
+        // Notify desktop specifically (mobile uploads first)
+        socket.emit('mobile_upload_completed', {
+          recordingId,
+          fileSizeBytes: recording.blob.size,
+        });
+
+        setPendingRecording(null);
+        pendingRecordingRef.current = null;
+        setMessage('Upload successful!');
+      } catch (err) {
+        let errMsg = 'Upload failed';
+        if (err instanceof Error) {
+          errMsg = err.message;
+          addDebug(`❌ Error details: ${err.message}`);
+          if (err.stack) {
+            console.error('Stack:', err.stack);
+          }
+        }
+        addDebug(`❌ Upload error: ${errMsg}`);
+        setMessage(`Upload error: ${errMsg}`);
+        console.error('Full upload error:', err);
+      } finally {
+        setUploading(false);
       }
     });
 

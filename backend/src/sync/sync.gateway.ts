@@ -284,6 +284,27 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  @SubscribeMessage('mobile_upload_completed')
+  async handleMobileUploadCompleted(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { recordingId: string; fileSizeBytes: number },
+  ) {
+    try {
+      const { recordingId, fileSizeBytes } = payload;
+      const recording = await this.sessionService.getRecording(recordingId);
+      
+      // Broadcast to all clients in session (especially desktop)
+      this.server.to(recording.sessionId).emit('mobile_upload_completed', {
+        recordingId,
+        fileSizeBytes,
+      });
+      
+      this.logger.log(`Mobile upload completed for recording ${recordingId}, broadcasted to session ${recording.sessionId}`);
+    } catch (error) {
+      this.logger.error(`Error broadcasting mobile upload completion: ${error.message}`);
+    }
+  }
+
   @SubscribeMessage('ready_for_next')
   async handleReadyForNext(
     @ConnectedSocket() client: Socket,
