@@ -587,9 +587,15 @@ export default function RecordingSession() {
           });
           addDebug(`✅ Upload complete`);
 
-          // Notify backend that upload is complete
+          // Notify backend and desktop that upload is complete
           const socket = getSocket();
           socket.emit('upload_completed', {
+            recordingId,
+            fileSizeBytes: recording.blob.size,
+          });
+          
+          // Notify desktop specifically (mobile uploads first)
+          socket.emit('mobile_upload_completed', {
             recordingId,
             fileSizeBytes: recording.blob.size,
           });
@@ -1098,22 +1104,37 @@ export default function RecordingSession() {
                 <button
                   onClick={async () => {
                     console.log('Uploading...');
-                    setMessage('Uploading...');
+                    setMessage('Uploading mobile first...');
                     
-                    // Emit to mobile device first
+                    // Emit to mobile device to upload first
                     const socket = getSocket();
                     if (socket && sessionId) {
                       socket.emit('confirm_upload', { sessionId });
-                    }
-                    
-                    // Then upload desktop recording
-                    try {
-                      await uploadVideo(pendingRecording);
-                      setPendingRecording(null);
-                      pendingRecordingRef.current = null;
-                    } catch (err) {
-                      console.error('Upload failed:', err);
-                      // Keep pending recording so user can retry
+                      
+                      // Wait for mobile to complete upload
+                      socket.once('mobile_upload_completed', async () => {
+                        addDebug('✅ Mobile upload done, uploading desktop...');
+                        setMessage('Uploading desktop...');
+                        
+                        // Now upload desktop recording
+                        try {
+                          await uploadVideo(pendingRecording);
+                          setPendingRecording(null);
+                          pendingRecordingRef.current = null;
+                        } catch (err) {
+                          console.error('Upload failed:', err);
+                          // Keep pending recording so user can retry
+                        }
+                      });
+                    } else {
+                      // No mobile device, just upload desktop
+                      try {
+                        await uploadVideo(pendingRecording);
+                        setPendingRecording(null);
+                        pendingRecordingRef.current = null;
+                      } catch (err) {
+                        console.error('Upload failed:', err);
+                      }
                     }
                   }}
                   className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
