@@ -152,6 +152,7 @@ export default function RecordingSession() {
         setCurrentDistance(storeDistance);
       }
       
+      // Show guide modal immediately when step changes
       setShowGuideModal(true);
       setHasSeenGuide(false);
     }
@@ -642,6 +643,13 @@ export default function RecordingSession() {
       setMessage(data.step ? `Next: ${data.step.displayName}` : 'All steps completed!');
     });
 
+    // Listen for guide modal close event from other devices
+    socket.on('close_guide_modal', () => {
+      console.log('📋 Guide modal close requested');
+      setShowGuideModal(false);
+      setHasSeenGuide(true);
+    });
+
     // Background upload function
     const uploadInBackground = async (
       recording: RecordingData,
@@ -858,6 +866,7 @@ export default function RecordingSession() {
       socket.off('start_recording');
       socket.off('stop_recording');
       socket.off('next_step_ready');
+      socket.off('close_guide_modal');
       socket.off('confirm_upload');
       socket.off('confirm_rerecord');
     };
@@ -894,13 +903,13 @@ export default function RecordingSession() {
         </div>
 
         {/* Video Previews Grid */}
-        <div className={`grid ${deviceType === 'desktop' ? 'md:grid-cols-2' : 'grid-cols-1'} gap-6 mb-6`}>
+        <div className={`grid ${deviceType === 'desktop' ? 'md:grid-cols-2' : 'grid-cols-1'} gap-6 mb-6 landscape:gap-3`}>
           {/* Front View / Current Device Video Preview */}
           <div>
-            <h3 className="text-lg font-semibold mb-3">
+            <h3 className="text-lg font-semibold mb-3 landscape:text-base landscape:mb-2">
               {deviceType === 'desktop' ? 'Front View (This Device)' : 'Side View Camera'}
             </h3>
-            <div className="relative bg-black rounded-lg overflow-hidden" style={{ aspectRatio: '16/9' }}>
+            <div className="relative bg-black rounded-lg overflow-hidden landscape:rounded" style={{ aspectRatio: '16/9' }}>
               <video
                 ref={videoRef}
                 autoPlay
@@ -1241,6 +1250,12 @@ export default function RecordingSession() {
                   onClick={() => {
                     setShowGuideModal(false);
                     setHasSeenGuide(true);
+                    
+                    // Broadcast to all devices to close the guide modal
+                    const socket = getSocket();
+                    if (socket && sessionId) {
+                      socket.emit('close_guide_modal', { sessionId });
+                    }
                   }}
                   className="btn-primary w-full text-lg py-3"
                 >
@@ -1294,7 +1309,7 @@ export default function RecordingSession() {
                   }}
                   className="px-4 py-3 bg-gray-500 hover:bg-gray-600 text-white rounded-lg font-medium transition-colors text-sm"
                 >
-                  🔄 Re-record
+                  Re-record
                 </button>
                 
                 <button
@@ -1305,7 +1320,7 @@ export default function RecordingSession() {
                   }}
                   className="px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors text-sm"
                 >
-                  💾 Save to Device
+                  Save to Device
                 </button>
                 
                 <button
@@ -1315,13 +1330,19 @@ export default function RecordingSession() {
                     
                     // Broadcast to all devices to start uploading
                     const socket = getSocket();
-                    if (socket && sessionId) {
+                    if (socket && sessionId && currentStep) {
                       socket.emit('confirm_upload', { sessionId });
+                      
+                      // Request next step immediately, passing current step info
+                      socket.emit('request_next_step', { 
+                        sessionId,
+                        currentPostureLabel: currentStep.postureLabel 
+                      });
                     }
                   }}
                   className="px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors text-sm"
                 >
-                  ☁️ Upload
+                  Upload
                 </button>
               </div>
 
@@ -1353,7 +1374,7 @@ export default function RecordingSession() {
         )}
 
         {/* Debug Info Panel (Mobile Only) */}
-        {deviceType === 'mobile' && debugInfo.length > 0 && (
+        {/* {deviceType === 'mobile' && debugInfo.length > 0 && (
           <div className="card bg-gray-100 mb-4">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-bold">Debug Log</h3>
@@ -1370,7 +1391,7 @@ export default function RecordingSession() {
               ))}
             </div>
           </div>
-        )}
+        )} */}
 
         {/* Error Message */}
         {cameraError && (
@@ -1382,24 +1403,24 @@ export default function RecordingSession() {
 
       {/* Upload Tasks Panel */}
       {uploadTasks.length > 0 && (
-        <div className={`fixed bottom-4 right-4 bg-white rounded-lg shadow-2xl border border-gray-300 transition-all duration-300 ${
-          showUploadPanel ? 'w-96' : 'w-64'
-        }`}>
+        <div className={`fixed bottom-2 left-2 right-2 sm:left-auto sm:right-4 sm:bottom-4 landscape:bottom-1 landscape:left-1 landscape:right-auto landscape:max-w-sm bg-white rounded-lg shadow-2xl border border-gray-300 transition-all duration-300 ${
+          showUploadPanel ? 'sm:w-96' : 'sm:w-64'
+        } max-w-full z-50`}>
           {/* Panel Header */}
-          <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50 rounded-t-lg">
-            <div className="flex items-center gap-2">
-              <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="flex items-center justify-between p-3 sm:p-4 landscape:p-2 border-b border-gray-200 bg-gray-50 rounded-t-lg">
+            <div className="flex items-center gap-2 min-w-0">
+              <svg className="w-4 h-4 sm:w-5 sm:h-5 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
               </svg>
-              <h3 className="font-bold text-gray-800">
-                Upload Tasks ({uploadTasks.filter(t => t.status === 'uploading').length} active)
+              <h3 className="font-bold text-gray-800 text-sm sm:text-base landscape:text-xs truncate">
+                Uploads ({uploadTasks.filter(t => t.status === 'uploading').length})
               </h3>
             </div>
             <button
               onClick={() => setShowUploadPanel(!showUploadPanel)}
-              className="text-gray-600 hover:text-gray-800 transition-colors"
+              className="text-gray-600 hover:text-gray-800 transition-colors flex-shrink-0 ml-2"
             >
-              <svg className={`w-5 h-5 transition-transform ${showUploadPanel ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className={`w-4 h-4 sm:w-5 sm:h-5 transition-transform ${showUploadPanel ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
             </button>
@@ -1407,16 +1428,16 @@ export default function RecordingSession() {
 
           {/* Panel Content */}
           {showUploadPanel && (
-            <div className="max-h-96 overflow-y-auto">
+            <div className="max-h-64 sm:max-h-96 landscape:max-h-40 overflow-y-auto">
               {uploadTasks.map((task) => (
-                <div key={task.id} className="p-4 border-b border-gray-100 last:border-b-0">
+                <div key={task.id} className="p-3 sm:p-4 border-b border-gray-100 last:border-b-0">
                   {/* Task Info */}
                   <div className="flex items-start justify-between mb-2">
-                    <div className="flex-1">
-                      <div className="font-semibold text-gray-800 text-sm">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold text-gray-800 text-xs sm:text-sm truncate">
                         {task.postureLabel}
                       </div>
-                      <div className="text-xs text-gray-500">
+                      <div className="text-xs text-gray-500 truncate">
                         {task.deviceType} • {task.viewType}
                       </div>
                     </div>
@@ -1424,14 +1445,14 @@ export default function RecordingSession() {
                     {/* Status Icon */}
                     <div className="flex-shrink-0 ml-2">
                       {task.status === 'queued' && (
-                        <div className="w-5 h-5">
+                        <div className="w-4 h-4 sm:w-5 sm:h-5">
                           <svg className="text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                           </svg>
                         </div>
                       )}
                       {task.status === 'uploading' && (
-                        <div className="w-5 h-5">
+                        <div className="w-4 h-4 sm:w-5 sm:h-5">
                           <svg className="animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
@@ -1439,12 +1460,12 @@ export default function RecordingSession() {
                         </div>
                       )}
                       {task.status === 'completed' && (
-                        <svg className="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg className="w-4 h-4 sm:w-5 sm:h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                         </svg>
                       )}
                       {task.status === 'failed' && (
-                        <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg className="w-4 h-4 sm:w-5 sm:h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                         </svg>
                       )}
@@ -1456,11 +1477,11 @@ export default function RecordingSession() {
                     <div className="mb-2">
                       <div className="flex justify-between text-xs text-gray-600 mb-1">
                         <span>Uploading...</span>
-                        <span>{task.progress}%</span>
+                        <span className="font-medium">{task.progress}%</span>
                       </div>
-                      <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                      <div className="w-full bg-gray-200 rounded-full h-1.5 sm:h-2 overflow-hidden">
                         <div
-                          className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                          className="bg-blue-500 h-1.5 sm:h-2 rounded-full transition-all duration-300"
                           style={{ width: `${task.progress}%` }}
                         />
                       </div>
@@ -1483,7 +1504,7 @@ export default function RecordingSession() {
 
                   {/* Error Message */}
                   {task.status === 'failed' && task.error && (
-                    <div className="text-xs text-red-600 mt-1">
+                    <div className="text-xs text-red-600 mt-1 break-words">
                       Error: {task.error}
                     </div>
                   )}
@@ -1494,10 +1515,10 @@ export default function RecordingSession() {
 
           {/* Clear Completed Button */}
           {showUploadPanel && uploadTasks.some(t => t.status === 'completed' || t.status === 'failed') && (
-            <div className="p-3 border-t border-gray-200 bg-gray-50">
+            <div className="p-2 sm:p-3 border-t border-gray-200 bg-gray-50 rounded-b-lg">
               <button
                 onClick={() => setUploadTasks(prev => prev.filter(t => t.status === 'uploading' || t.status === 'queued'))}
-                className="w-full text-xs text-gray-600 hover:text-gray-800 font-medium transition-colors"
+                className="w-full text-xs text-gray-600 hover:text-gray-800 font-medium transition-colors py-1"
               >
                 Clear Completed Tasks
               </button>

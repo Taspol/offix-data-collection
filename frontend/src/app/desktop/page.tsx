@@ -145,6 +145,19 @@ export default function DesktopPage() {
         setSessionStatus('READY');
       });
 
+      socket.on('next_step_ready', (data: { step: any }) => {
+        console.log('➡️ Next step ready:', data.step);
+        if (data.step) {
+          // Update currentStepIndex to match the new step
+          const newStepIndex = allSteps.findIndex(s => s.id === data.step.id);
+          if (newStepIndex !== -1) {
+            console.log(`Updating step index from ${stepIndexRef.current} to ${newStepIndex}`);
+            stepIndexRef.current = newStepIndex;
+            setCurrentStepIndex(newStepIndex);
+          }
+        }
+      });
+
       socket.on('error', (error) => {
         console.error('Socket error:', error);
         alert(error.message);
