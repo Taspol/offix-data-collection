@@ -19,6 +19,7 @@ export default function DesktopPage() {
   const stepIndexRef = useRef(0); // Track step index for event handlers
   const distanceRef = useRef<'nom' | 'close' | 'far'>('nom');
   const autoProgressTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const hasCreatedSessionRef = useRef(false); // Prevent duplicate session creation
 
   const distances: Array<'nom' | 'close' | 'far'> = ['nom', 'close', 'far'];
 
@@ -44,6 +45,12 @@ export default function DesktopPage() {
 
   // Create session on mount
   useEffect(() => {
+    // Prevent duplicate session creation in React Strict Mode
+    if (hasCreatedSessionRef.current) {
+      return;
+    }
+    hasCreatedSessionRef.current = true;
+    
     createSession();
   }, []);
 
@@ -81,6 +88,15 @@ export default function DesktopPage() {
       // Connect to WebSocket
       await connectSocket();
       const socket = getSocket();
+
+      // Remove any existing listeners to prevent duplicates
+      socket.off('joined_session');
+      socket.off('device_joined');
+      socket.off('device_disconnected');
+      socket.off('recording_uploaded');
+      socket.off('session_completed');
+      socket.off('confirm_rerecord');
+      socket.off('error');
 
       // Join session
       console.log('Emitting join_session with sessionId:', session.id);

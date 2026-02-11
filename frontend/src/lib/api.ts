@@ -57,23 +57,30 @@ export const api = {
     viewType: string,
     postureLabel: string,
   ): Promise<UploadUrlResponse> {
-    const response = await fetch(`${API_URL}/api/sessions/${sessionId}/upload-url`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        recordingId,
-        deviceType,
-        viewType,
-        postureLabel,
-      }),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`Failed to get upload URL: ${response.status} ${errorText}`);
+    try {
+      const response = await fetch(`${API_URL}/api/sessions/${sessionId}/upload-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recordingId,
+          deviceType,
+          viewType,
+          postureLabel,
+        }),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        throw new Error(`Failed to get upload URL: ${response.status} ${errorText}`);
+      }
+      
+      return response.json();
+    } catch (err) {
+      if (err instanceof TypeError && err.message.includes('fetch')) {
+        throw new Error('Network error: Cannot reach server. Check your internet connection.');
+      }
+      throw err;
     }
-    
-    return response.json();
   },
 
   async completeUpload(
@@ -85,49 +92,55 @@ export const api = {
       metadata?: Record<string, any>;
     },
   ): Promise<void> {
-    const response = await fetch(`${API_URL}/api/sessions/recordings/${recordingId}/complete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`Failed to complete upload: ${response.status} ${errorText}`);
+    try {
+      const response = await fetch(`${API_URL}/api/sessions/recordings/${recordingId}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        throw new Error(`Failed to complete upload: ${response.status} ${errorText}`);
+      }
+    } catch (err) {
+      if (err instanceof TypeError && err.message.includes('fetch')) {
+        throw new Error('Network error: Cannot reach server. Check your internet connection.');
+      }
+      throw err;
     }
   },
 
-  async uploadVideo(uploadUrl: string, videoBlob: Blob, storagePath?: string): Promise<void> {
+  async uploadVideo(
+    uploadUrl: string, 
+    videoBlob: Blob, 
+    storagePath?: string,
+    onProgress?: (progress: number) => void
+  ): Promise<void> {
+    const blobSizeMB = (videoBlob.size / 1024 / 1024).toFixed(2);
     console.log('🚀 Starting upload:', { 
-      blobSize: videoBlob.size, 
+      blobSize: videoBlob.size,
+      blobSizeMB: `${blobSizeMB} MB`,
       blobType: videoBlob.type,
       isLocalStorage: uploadUrl.includes('/api/storage/upload')
     });
 
-    // Create abort controller for timeout - dynamic based on file size
-    // Assume 100KB/s upload speed minimum, with 30s base timeout
-    const minUploadSpeed = 100 * 1024; // 100 KB/s
-    const baseTimeout = 30000; // 30 seconds base
-    const estimatedTime = (videoBlob.size / minUploadSpeed) * 1000; // Convert to ms
-    const timeoutMs = Math.max(baseTimeout, Math.min(estimatedTime * 2, 180000)); // Min 30s, max 3 minutes
-    
-    console.log(`⏱️ Upload timeout set to ${Math.round(timeoutMs / 1000)}s for ${Math.round(videoBlob.size / 1024 / 1024 * 100) / 100}MB file`);
-    
-    const controller = new AbortController();
-    const timeoutStart = Date.now();
-    const timeout = setTimeout(() => {
-      const elapsed = Math.round((Date.now() - timeoutStart) / 1000);
-      console.error(`⏰ Upload timeout after ${elapsed}s (limit: ${Math.round(timeoutMs / 1000)}s)`);
-      controller.abort();
-    }, timeoutMs);
-
     try {
       // Check if this is a local storage upload (contains /api/storage/upload)
       if (uploadUrl.includes('/api/storage/upload')) {
-        // Local storage - use FormData with multipart/form-data
-        console.log('📦 Using FormData for local storage');
+        // Local storage - use XMLHttpRequest for progress tracking
+        console.log('📦 Using XMLHttpRequest for local storage with progress');
+        
+        // Determine file extension from MIME type
+        let filename = 'recording.webm';
+        if (videoBlob.type.includes('mp4')) {
+          filename = 'recording.mp4';
+        } else if (videoBlob.type.includes('webm')) {
+          filename = 'recording.webm';
+        }
+        
         const formData = new FormData();
-        formData.append('file', videoBlob, 'recording.webm');
+        formData.append('file', videoBlob, filename);
         
         const urlWithPath = storagePath 
           ? `${uploadUrl}?path=${encodeURIComponent(storagePath)}`
@@ -135,29 +148,54 @@ export const api = {
 
         console.log('📤 POSTing to:', urlWithPath);
         const uploadStart = Date.now();
-        const response = await fetch(urlWithPath, {
-          method: 'POST',
-          body: formData,
-          signal: controller.signal,
+        
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          
+          // No timeout - allow upload to take as long as needed
+          xhr.timeout = 0;
+          
+          // Track upload progress
+          xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable && onProgress) {
+              const percentComplete = (e.loaded / e.total) * 100;
+              onProgress(percentComplete);
+              console.log(`📊 Upload progress: ${percentComplete.toFixed(1)}%`);
+            }
+          });
+          
+          xhr.addEventListener('load', () => {
+            const uploadTime = ((Date.now() - uploadStart) / 1000).toFixed(2);
+            console.log(`📥 Response received in ${uploadTime}s - Status: ${xhr.status}`);
+            
+            if (xhr.status >= 200 && xhr.status < 300) {
+              console.log('✅ Local upload successful');
+              resolve();
+            } else {
+              console.error('❌ Upload failed:', xhr.responseText);
+              reject(new Error(`Upload failed: ${xhr.status} ${xhr.responseText}`));
+            }
+          });
+          
+          xhr.addEventListener('error', (e) => {
+            console.error('❌ Upload error event:', e);
+            console.error('XHR state:', {
+              readyState: xhr.readyState,
+              status: xhr.status,
+              statusText: xhr.statusText,
+              responseText: xhr.responseText
+            });
+            reject(new Error('Network error during upload. Check connection and try again.'));
+          });
+          
+          xhr.addEventListener('abort', () => {
+            console.error('❌ Upload aborted');
+            reject(new Error('Upload was aborted'));
+          });
+          
+          xhr.open('POST', urlWithPath);
+          xhr.send(formData);
         });
-
-        const uploadTime = ((Date.now() - uploadStart) / 1000).toFixed(2);
-        console.log(`📥 Response received in ${uploadTime}s - Status: ${response.status}`);
-        
-        if (!response.ok) {
-          const errorText = await response.text().catch(() => 'Unknown error');
-          console.error('❌ Upload failed:', errorText);
-          throw new Error(`Upload failed: ${response.status} ${errorText}`);
-        }
-        
-        // Consume response body to ensure request completes
-        try {
-          await response.text();
-        } catch (e) {
-          // Ignore - body might already be consumed or empty
-        }
-        
-        console.log('✅ Local upload successful');
       } else {
         // Cloud storage (S3/Supabase) - use PUT with direct blob
         console.log('☁️ Using PUT for cloud storage');
@@ -168,7 +206,6 @@ export const api = {
           headers: {
             'Content-Type': videoBlob.type || 'video/webm',
           },
-          signal: controller.signal,
         });
 
         const uploadTime = ((Date.now() - uploadStart) / 1000).toFixed(2);
@@ -182,15 +219,8 @@ export const api = {
         console.log('✅ Cloud upload successful');
       }
     } catch (err) {
-      clearTimeout(timeout); // Clear timeout immediately on error
-      if (err instanceof Error && err.name === 'AbortError') {
-        const elapsed = Math.round((Date.now() - timeoutStart) / 1000);
-        throw new Error(`Upload timeout after ${elapsed}s - file too large or network too slow`);
-      }
       console.error('❌ Upload error:', err);
       throw err;
-    } finally {
-      clearTimeout(timeout);
     }
   },
 };

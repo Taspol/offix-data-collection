@@ -11,18 +11,37 @@ export const useCamera = () => {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const startTimestampRef = useRef<number>(0);
 
+  // Get list of available cameras
+  const getAvailableCameras = useCallback(async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter(device => device.kind === 'videoinput');
+      console.log('📹 Available cameras:', cameras.map(c => ({ id: c.deviceId, label: c.label })));
+      setAvailableCameras(cameras);
+      return cameras;
+    } catch (err) {
+      console.error('Failed to enumerate cameras:', err);
+      return [];
+    }
+  }, []);
+
   // Request camera access
-  const requestCamera = useCallback(async (facingMode: 'user' | 'environment' = 'user') => {
+  const requestCamera = useCallback(async (facingMode: 'user' | 'environment' = 'user', deviceId?: string) => {
     try {
       // Try exact constraints first
+      const videoConstraints: any = deviceId 
+        ? { deviceId: { exact: deviceId } }
+        : { facingMode };
+      
       const exactConstraints: MediaStreamConstraints = {
         video: {
-          facingMode,
+          ...videoConstraints,
           width: { exact: 1280 },
           height: { exact: 720 },
           frameRate: { exact: 30 },
@@ -53,7 +72,7 @@ export const useCamera = () => {
         
         const idealConstraints: MediaStreamConstraints = {
           video: {
-            facingMode,
+            ...videoConstraints,
             width: { ideal: 1280, min: 1280 },
             height: { ideal: 720, min: 720 },
             frameRate: { ideal: 30, min: 24 },
@@ -103,13 +122,15 @@ export const useCamera = () => {
       chunksRef.current = [];
       startTimestampRef.current = Date.now();
 
-      // Try codecs in order of preference
+      // Try codecs in order of preference - prioritize MP4
       let options: MediaRecorderOptions | undefined;
       const codecs = [
+        'video/mp4;codecs=avc1', // H.264 in MP4
+        'video/mp4;codecs=h264',
+        'video/mp4',
         'video/webm;codecs=vp9',
         'video/webm;codecs=vp8',
         'video/webm',
-        'video/mp4',
       ];
 
       for (const codec of codecs) {
@@ -144,7 +165,7 @@ export const useCamera = () => {
         mediaRecorderRef.current = mediaRecorder;
         mediaRecorder.start(100); // Collect data every 100ms
         setIsRecording(true);
-        console.log('Recording started successfully');
+        console.log('Recording started successfully with mimeType:', mediaRecorder.mimeType);
       } catch (err) {
         console.error('Failed to start MediaRecorder:', err);
         throw err;
@@ -227,9 +248,11 @@ export const useCamera = () => {
     stream,
     isRecording,
     error,
+    availableCameras,
     requestCamera,
     startRecording,
     stopRecording,
     releaseCamera,
+    getAvailableCameras,
   };
 };

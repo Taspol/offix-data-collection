@@ -9,6 +9,14 @@ export const getSocket = (): Socket => {
     socket = io(WS_URL, {
       transports: ['websocket'],
       autoConnect: false,
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
+      // Keep connection alive during uploads
+      pingInterval: 25000,
+      pingTimeout: 60000,
     });
   }
   return socket;

@@ -74,6 +74,29 @@ export default function RecordingSession() {
   const pendingRecordingRef = useRef<RecordingData | null>(null);
   const previousStepIdRef = useRef<number | null>(null);
   const previousDistanceRef = useRef<string>('nom');
+  const [selectedCameraId, setSelectedCameraId] = useState<string>('');
+  const [showCameraSelector, setShowCameraSelector] = useState(false);
+  const wakeLockRef = useRef<any>(null); // Wake Lock to prevent sleep during uploads
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadTasks, setUploadTasks] = useState<Array<{
+    id: string;
+    postureLabel: string;
+    deviceType: string;
+    viewType: string;
+    progress: number;
+    status: 'uploading' | 'completed' | 'failed' | 'queued';
+    error?: string;
+  }>>([]);
+  const [showUploadPanel, setShowUploadPanel] = useState(false);
+
+  // Upload queue system
+  const uploadQueueRef = useRef<Array<{
+    recording: RecordingData;
+    recordingId: string;
+    taskId: string;
+    postureLabel: string;
+  }>>([]);
+  const isProcessingUploadRef = useRef(false);
 
   // Add debug message to UI
   const addDebug = (msg: string) => {
@@ -85,10 +108,12 @@ export default function RecordingSession() {
     stream,
     isRecording,
     error: cameraError,
+    availableCameras,
     requestCamera,
     startRecording,
     stopRecording,
     releaseCamera,
+    getAvailableCameras,
   } = useCamera();
 
   const {
@@ -416,16 +441,88 @@ export default function RecordingSession() {
     }
   }, [deviceType]);
 
-  // Request camera on mount
+  // Load available cameras and request default camera on mount
   useEffect(() => {
-    const facingMode = 'user'; // Always use front camera
-    requestCamera(facingMode);
+    const initCamera = async () => {
+      const facingMode = 'user'; // Always use front camera
+      // Request camera first to get permissions
+      await requestCamera(facingMode, selectedCameraId || undefined);
+      // Then enumerate cameras (labels will be available after permission granted)
+      const cameras = await getAvailableCameras();
+      console.log('🎥 Cameras detected:', cameras.length, cameras);
+      addDebug(`Cameras: ${cameras.length}`);
+    };
+    
+    initCamera();
 
     return () => {
       releaseCamera();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceType]);
+  
+  // Handle camera change
+  const handleCameraChange = async (cameraId: string) => {
+    setSelectedCameraId(cameraId);
+    releaseCamera();
+    await requestCamera('user', cameraId);
+  };
+
+  // Download video to device
+  const downloadVideo = (recording: RecordingData) => {
+    const blob = recording.blob;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    
+    // Determine file extension from blob type
+    let extension = 'webm';
+    if (blob.type.includes('mp4')) {
+      extension = 'mp4';
+    }
+    
+    // Create filename with timestamp and posture info
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+    const posture = currentStepRef.current?.postureLabel || 'recording';
+    const filename = `${posture}_${deviceType}_${viewType}_${timestamp}.${extension}`;
+    
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    console.log('📥 Video downloaded:', filename);
+  };
+
+  // Request wake lock to prevent device from sleeping
+  const requestWakeLock = async () => {
+    if ('wakeLock' in navigator && deviceType === 'mobile') {
+      try {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+        console.log('🔒 Wake lock acquired - device will stay awake');
+        
+        wakeLockRef.current.addEventListener('release', () => {
+          console.log('🔓 Wake lock released');
+        });
+      } catch (err) {
+        console.warn('⚠️ Wake lock request failed:', err);
+      }
+    }
+  };
+
+  // Release wake lock
+  const releaseWakeLock = async () => {
+    if (wakeLockRef.current) {
+      try {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+        console.log('🔓 Wake lock released manually');
+      } catch (err) {
+        console.warn('⚠️ Wake lock release failed:', err);
+      }
+    }
+  };
 
   // Listen to WebSocket events
   useEffect(() => {
@@ -545,66 +642,205 @@ export default function RecordingSession() {
       setMessage(data.step ? `Next: ${data.step.displayName}` : 'All steps completed!');
     });
 
+    // Background upload function
+    const uploadInBackground = async (
+      recording: RecordingData,
+      recordingId: string,
+      taskId: string,
+      postureLabel: string
+    ) => {
+      // Acquire wake lock to prevent device from sleeping during upload
+      await requestWakeLock();
+      
+      try {
+        addDebug(`📤 Starting background upload for ${recordingId.slice(0, 8)}...`);
+        console.log('📤 Upload details:', {
+          recordingId,
+          blobSize: recording.blob.size,
+          blobType: recording.blob.type,
+          sessionId,
+          deviceType,
+          viewType,
+          postureLabel
+        });
+
+        // Validate recording blob
+        if (!recording.blob || recording.blob.size === 0) {
+          throw new Error('Invalid recording: blob is empty');
+        }
+
+        // Update task progress: 5%
+        setUploadTasks(prev => prev.map(task => 
+          task.id === taskId ? { ...task, progress: 5 } : task
+        ));
+
+        // Stage 1: Get upload URL
+        const uploadUrlData = await api.getUploadUrl(
+          sessionId!,
+          recordingId,
+          deviceType || 'desktop',
+          viewType || 'front',
+          postureLabel,
+        );
+        addDebug(`✅ Got upload URL: ${uploadUrlData.storagePath}`);
+        
+        // Update task progress: 10%
+        setUploadTasks(prev => prev.map(task => 
+          task.id === taskId ? { ...task, progress: 10 } : task
+        ));
+
+        // Stage 2: Upload the video with retry logic
+        let uploadAttempts = 0;
+        const maxRetries = 3;
+        let uploadSuccess = false;
+        
+        while (!uploadSuccess && uploadAttempts < maxRetries) {
+          try {
+            uploadAttempts++;
+            if (uploadAttempts > 1) {
+              addDebug(`🔄 Retry attempt ${uploadAttempts}/${maxRetries}...`);
+              // Wait before retry: 2s, 5s, 10s
+              const delayMs = uploadAttempts * uploadAttempts * 1000;
+              await new Promise(resolve => setTimeout(resolve, delayMs));
+            }
+            
+            await api.uploadVideo(
+              uploadUrlData.uploadUrl,
+              recording.blob,
+              uploadUrlData.storagePath,
+              (progress) => {
+                // Map upload progress from 10% to 90%
+                const mappedProgress = 10 + (progress * 0.80);
+                setUploadTasks(prev => prev.map(task => 
+                  task.id === taskId ? { ...task, progress: Math.round(mappedProgress) } : task
+                ));
+              },
+            );
+            uploadSuccess = true;
+            addDebug(`✅ Video uploaded`);
+          } catch (uploadErr) {
+            const uploadErrMsg = uploadErr instanceof Error ? uploadErr.message : 'Unknown error';
+            addDebug(`❌ Upload attempt ${uploadAttempts} failed: ${uploadErrMsg}`);
+            
+            if (uploadAttempts >= maxRetries) {
+              throw new Error(`Upload failed after ${maxRetries} attempts: ${uploadErrMsg}`);
+            }
+          }
+        }
+
+        // Stage 3: Complete the upload
+        await api.completeUpload(recordingId, {
+          stopTimestamp: recording.stopTimestamp,
+          durationMs: recording.durationMs,
+          fileSizeBytes: recording.blob.size,
+        });
+        addDebug(`✅ Upload complete`);
+        
+        // Update task to completed
+        setUploadTasks(prev => prev.map(task => 
+          task.id === taskId ? { ...task, progress: 100, status: 'completed' } : task
+        ));
+
+        // Notify backend that upload is complete
+        const socket = getSocket();
+        socket.emit('upload_completed', {
+          recordingId,
+          fileSizeBytes: recording.blob.size,
+        });
+
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'Upload failed';
+        addDebug(`❌ Upload error: ${errMsg}`);
+        console.error('❌ Background upload failed:', {
+          error: err,
+          errorMessage: errMsg,
+          recordingId,
+          taskId,
+          postureLabel,
+          blobSize: recording.blob.size,
+          blobType: recording.blob.type
+        });
+        
+        // Update task to failed
+        setUploadTasks(prev => prev.map(task => 
+          task.id === taskId ? { ...task, status: 'failed', error: errMsg } : task
+        ));
+      } finally {
+        // Release wake lock after upload completes
+        await releaseWakeLock();
+        
+        // Mark processing as complete and process next upload
+        isProcessingUploadRef.current = false;
+        processUploadQueue();
+      }
+    };
+
+    // Process upload queue - starts next upload if not already processing
+    const processUploadQueue = () => {
+      if (isProcessingUploadRef.current || uploadQueueRef.current.length === 0) {
+        return;
+      }
+
+      // Get next task from queue
+      const nextTask = uploadQueueRef.current.shift();
+      if (!nextTask) return;
+
+      // Mark as processing
+      isProcessingUploadRef.current = true;
+
+      // Update task status from queued to uploading
+      setUploadTasks(prev => prev.map(task => 
+        task.id === nextTask.taskId ? { ...task, status: 'uploading' } : task
+      ));
+
+      // Start upload
+      uploadInBackground(
+        nextTask.recording,
+        nextTask.recordingId,
+        nextTask.taskId,
+        nextTask.postureLabel
+      );
+    };
+
     // Listen for confirmation to upload from any device
     socket.on('confirm_upload', async () => {
       addDebug('✅ Upload confirmed');
       const recording = pendingRecordingRef.current;
       if (recording) {
-        setMessage('Uploading...');
-        try {
-          // Use the recording ID that was provided in start_recording event
-          const recordingId = recordingIdRef.current;
-          if (!recordingId) {
-            throw new Error('No recording ID found');
-          }
-
-          addDebug(`📤 Starting upload for ${recordingId.slice(0, 8)}...`);
-          setUploading(true);
-
-          // Stage 1: Get upload URL
-          const uploadUrlData = await api.getUploadUrl(
-            sessionId!,
-            recordingId,
-            deviceType || 'desktop',
-            viewType || 'front',
-            currentStepRef.current?.postureLabel || 'unknown',
-          );
-          addDebug(`✅ Got upload URL: ${uploadUrlData.storagePath}`);
-
-          // Stage 2: Upload the video
-          await api.uploadVideo(
-            uploadUrlData.uploadUrl,
-            recording.blob,
-            uploadUrlData.storagePath,
-          );
-          addDebug(`✅ Video uploaded`);
-
-          // Stage 3: Complete the upload
-          await api.completeUpload(recordingId, {
-            stopTimestamp: recording.stopTimestamp,
-            durationMs: recording.durationMs,
-            fileSizeBytes: recording.blob.size,
-          });
-          addDebug(`✅ Upload complete`);
-
-          // Notify backend that upload is complete
-          const socket = getSocket();
-          socket.emit('upload_completed', {
-            recordingId,
-            fileSizeBytes: recording.blob.size,
-          });
-
-          setPendingRecording(null);
-          pendingRecordingRef.current = null;
-          setMessage('Upload successful!');
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : 'Upload failed';
-          addDebug(`❌ Upload error: ${errMsg}`);
-          setMessage(`Upload failed: ${errMsg}`);
-          console.error('Upload failed:', err);
-        } finally {
-          setUploading(false);
+        // Close the confirmation modal immediately
+        setPendingRecording(null);
+        pendingRecordingRef.current = null;
+        
+        const recordingId = recordingIdRef.current;
+        if (!recordingId) {
+          console.error('No recording ID found');
+          return;
         }
+
+        const postureLabel = currentStepRef.current?.postureLabel || 'unknown';
+        const taskId = `${recordingId}-${Date.now()}`;
+        
+        // Add upload task to the queue
+        uploadQueueRef.current.push({
+          recording,
+          recordingId,
+          taskId,
+          postureLabel,
+        });
+        
+        // Add task to UI with 'queued' status
+        setUploadTasks(prev => [...prev, {
+          id: taskId,
+          postureLabel,
+          deviceType: deviceType || 'unknown',
+          viewType: viewType || 'unknown',
+          progress: 0,
+          status: 'queued',
+        }]);
+        setShowUploadPanel(true);
+        
+        // Try to process the queue (will only start if not already processing)
+        processUploadQueue();
       }
     });
 
@@ -626,117 +862,6 @@ export default function RecordingSession() {
       socket.off('confirm_rerecord');
     };
   }, [currentStep, startRecording, stopRecording, setRecording, setCurrentStep]);
-
-  // Upload video to storage
-  const uploadVideo = async (recordingData: RecordingData) => {
-    const recordingId = recordingIdRef.current;
-    const step = currentStepRef.current; // Use ref instead of state
-    
-    addDebug(`Upload: ${recordingData.blob.size}b`);
-    console.log('Attempting upload with:', {
-      recordingId,
-      sessionId,
-      deviceType,
-      viewType,
-      hasCurrentStep: !!step,
-      blobSize: recordingData?.blob?.size,
-      currentStepLabel: step?.postureLabel,
-    });
-    
-    if (!sessionId || !deviceType || !viewType || !step || !recordingId) {
-      const missing = [];
-      if (!sessionId) missing.push('sessionId');
-      if (!deviceType) missing.push('deviceType');
-      if (!viewType) missing.push('viewType');
-      if (!step) missing.push('currentStep');
-      if (!recordingId) missing.push('recordingId');
-      
-      addDebug(`❌ Missing: ${missing.join(',')}`);
-      console.error('❌ Missing required fields:', missing);
-      throw new Error(`Missing session information or recording ID: ${missing.join(', ')}`);
-    }
-
-    setUploading(true);
-
-    try {
-      const socket = getSocket();
-      addDebug('upload_started');
-      console.log('Emitting upload_started for recordingId:', recordingId);
-      socket.emit('upload_started', { recordingId });
-
-      addDebug('Getting URL...');
-      console.log('Requesting upload URL...');
-      const uploadInfo = await api.getUploadUrl(
-        sessionId,
-        recordingId,
-        deviceType,
-        viewType,
-        step.postureLabel,
-      );
-      addDebug('Got URL');
-      console.log('Got upload URL:', uploadInfo.uploadUrl);
-
-      // Upload video
-      addDebug('📹 Uploading...');
-      console.log('📹 Uploading video blob...');
-      try {
-        await api.uploadVideo(uploadInfo.uploadUrl, recordingData.blob, uploadInfo.storagePath);
-        addDebug('Uploaded');
-        console.log('Video uploaded successfully');
-      } catch (uploadErr) {
-        const uploadErrMsg = uploadErr instanceof Error ? uploadErr.message : 'Upload failed';
-        addDebug(`❌Upload failed: ${uploadErrMsg}`);
-        console.error('❌ Video upload error:', uploadErr);
-        throw new Error(`Video upload failed: ${uploadErrMsg}`);
-      }
-
-      // Complete upload
-      addDebug('✔️ Completing...');
-      console.log('✔️ Completing upload...');
-      try {
-        await api.completeUpload(recordingId, {
-          stopTimestamp: recordingData.stopTimestamp,
-          durationMs: recordingData.durationMs,
-          fileSizeBytes: recordingData.blob.size,
-        });
-        addDebug('Done!');
-        console.log('✅ Upload completed');
-      } catch (completeErr) {
-        const completeErrMsg = completeErr instanceof Error ? completeErr.message : 'Complete failed';
-        addDebug(`❌ Complete failed: ${completeErrMsg}`);
-        console.error('❌ Complete upload error:', completeErr);
-        throw new Error(`Complete upload failed: ${completeErrMsg}`);
-      }
-
-      socket.emit('upload_completed', {
-        recordingId,
-        fileSizeBytes: recordingData.blob.size,
-      });
-
-      setMessage('Upload completed!');
-      setRecordingDuration(0);
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      addDebug(`❌ Upload err: ${errMsg}`);
-      console.error('❌ Upload failed:', err);
-      console.error('Error details:', {
-        message: errMsg,
-        stack: err instanceof Error ? err.stack : undefined,
-        recordingId,
-        sessionId,
-        deviceType,
-        viewType,
-      });
-      setMessage(`Upload failed: ${errMsg}`);
-      
-      // Force re-throw to ensure error is visible
-      throw err;
-    } finally {
-      console.log('🏁 Upload flow finished - cleaning up');
-      setUploading(false);
-      setCurrentRecordingId(null);
-    }
-  };
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center p-4">
@@ -764,7 +889,7 @@ export default function RecordingSession() {
             </h2>
           </div>
           <p className="text-gray-600">
-            View: {viewType} | Device ID: {deviceId?.slice(0, 8)}
+            View: {viewType} | Device ID: {deviceId?.slice(0, 8)} | Cameras: {availableCameras.length}
           </p>
         </div>
 
@@ -806,6 +931,23 @@ export default function RecordingSession() {
                 </svg>
                 {showKeypoints ? 'Hide' : 'Show'} Keypoints
               </button>
+
+              {/* Camera selector button */}
+              {availableCameras.length >= 1 && (
+                <button
+                  onClick={() => {
+                    console.log('📷 Camera button clicked');
+                    setShowCameraSelector(true);
+                  }}
+                  className="absolute bottom-4 right-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-lg transition-colors flex items-center gap-2 z-50"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  <span>Camera ({availableCameras.length})</span>
+                </button>
+              )}
               
               {/* Posture Validation Overlay */}
           {showPostureGuide && isPoseReady && !isRecording && (
@@ -886,16 +1028,6 @@ export default function RecordingSession() {
             <div className="absolute top-4 left-4 flex items-center gap-2 bg-red-600 text-white px-4 py-2 rounded-full z-40">
               <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
               <span className="font-medium">REC {recordingDuration}s</span>
-            </div>
-          )}
-
-          {/* Upload Indicator */}
-          {isUploading && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-70">
-              <div className="text-white text-center">
-                <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
-                <p className="text-xl">Uploading...</p>
-              </div>
             </div>
           )}
         </div>
@@ -1005,6 +1137,75 @@ export default function RecordingSession() {
       )}
     </div>
 
+        {/* Camera Selector Modal */}
+        {showCameraSelector && (
+          <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg max-w-md w-full p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-2xl font-bold">Select Camera</h2>
+                <button
+                  onClick={() => setShowCameraSelector(false)}
+                  className="text-gray-500 hover:text-gray-700 transition-colors"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              
+              <p className="text-gray-600 mb-4">Choose which camera to use for recording:</p>
+              
+              <div className="space-y-2">
+                {availableCameras.map((camera, index) => {
+                  const isSelected = selectedCameraId === camera.deviceId || (!selectedCameraId && index === 0);
+                  return (
+                    <button
+                      key={camera.deviceId}
+                      onClick={() => {
+                        handleCameraChange(camera.deviceId);
+                        setShowCameraSelector(false);
+                      }}
+                      className={`w-full text-left p-4 rounded-lg border-2 transition-all ${
+                        isSelected
+                          ? 'border-primary-600 bg-primary-50'
+                          : 'border-gray-200 hover:border-gray-300 bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                        </svg>
+                        <div className="flex-1">
+                          <div className="font-semibold text-gray-900">
+                            {camera.label || `Camera ${index + 1}`}
+                          </div>
+                          {isSelected && (
+                            <div className="text-xs text-primary-600 font-medium mt-1">
+                              Currently Active
+                            </div>
+                          )}
+                        </div>
+                        {isSelected && (
+                          <svg className="w-5 h-5 text-primary-600" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                          </svg>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              
+              <button
+                onClick={() => setShowCameraSelector(false)}
+                className="mt-4 w-full btn-secondary"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Guide Video Modal */}
         {showGuideModal && currentStep && (
           <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
@@ -1064,11 +1265,11 @@ export default function RecordingSession() {
               
               <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
                 <p className="text-sm text-yellow-900">
-                  <strong>Review your recording:</strong> Was the posture correct? If not, you can re-record.
+                  <strong>Review your recording:</strong> Was the posture correct? You can re-record, save to your device, or upload to server.
                 </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-3 mb-4">
                 <button
                   onClick={async () => {
                     console.log('🔄 Re-recording...');
@@ -1091,9 +1292,20 @@ export default function RecordingSession() {
                       });
                     }
                   }}
-                  className="px-6 py-3 bg-gray-500 hover:bg-gray-600 text-white rounded-lg font-medium transition-colors"
+                  className="px-4 py-3 bg-gray-500 hover:bg-gray-600 text-white rounded-lg font-medium transition-colors text-sm"
                 >
-                  Re-record
+                  🔄 Re-record
+                </button>
+                
+                <button
+                  onClick={() => {
+                    console.log('💾 Saving to device...');
+                    downloadVideo(pendingRecording);
+                    setMessage('Video saved to device!');
+                  }}
+                  className="px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors text-sm"
+                >
+                  💾 Save to Device
                 </button>
                 
                 <button
@@ -1107,10 +1319,16 @@ export default function RecordingSession() {
                       socket.emit('confirm_upload', { sessionId });
                     }
                   }}
-                  className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
+                  className="px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors text-sm"
                 >
-                  ✓ Upload Recording
+                  ☁️ Upload
                 </button>
+              </div>
+
+              <div className="text-center">
+                <p className="text-xs text-gray-500">
+                  Tip: You can save locally and still upload later
+                </p>
               </div>
             </div>
           </div>
@@ -1161,6 +1379,132 @@ export default function RecordingSession() {
           </div>
         )}
       </div>
+
+      {/* Upload Tasks Panel */}
+      {uploadTasks.length > 0 && (
+        <div className={`fixed bottom-4 right-4 bg-white rounded-lg shadow-2xl border border-gray-300 transition-all duration-300 ${
+          showUploadPanel ? 'w-96' : 'w-64'
+        }`}>
+          {/* Panel Header */}
+          <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50 rounded-t-lg">
+            <div className="flex items-center gap-2">
+              <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+              </svg>
+              <h3 className="font-bold text-gray-800">
+                Upload Tasks ({uploadTasks.filter(t => t.status === 'uploading').length} active)
+              </h3>
+            </div>
+            <button
+              onClick={() => setShowUploadPanel(!showUploadPanel)}
+              className="text-gray-600 hover:text-gray-800 transition-colors"
+            >
+              <svg className={`w-5 h-5 transition-transform ${showUploadPanel ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Panel Content */}
+          {showUploadPanel && (
+            <div className="max-h-96 overflow-y-auto">
+              {uploadTasks.map((task) => (
+                <div key={task.id} className="p-4 border-b border-gray-100 last:border-b-0">
+                  {/* Task Info */}
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex-1">
+                      <div className="font-semibold text-gray-800 text-sm">
+                        {task.postureLabel}
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {task.deviceType} • {task.viewType}
+                      </div>
+                    </div>
+                    
+                    {/* Status Icon */}
+                    <div className="flex-shrink-0 ml-2">
+                      {task.status === 'queued' && (
+                        <div className="w-5 h-5">
+                          <svg className="text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                        </div>
+                      )}
+                      {task.status === 'uploading' && (
+                        <div className="w-5 h-5">
+                          <svg className="animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                          </svg>
+                        </div>
+                      )}
+                      {task.status === 'completed' && (
+                        <svg className="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                      )}
+                      {task.status === 'failed' && (
+                        <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Progress Bar */}
+                  {task.status === 'uploading' && (
+                    <div className="mb-2">
+                      <div className="flex justify-between text-xs text-gray-600 mb-1">
+                        <span>Uploading...</span>
+                        <span>{task.progress}%</span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                        <div
+                          className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${task.progress}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Queued Message */}
+                  {task.status === 'queued' && (
+                    <div className="text-xs text-gray-500 font-medium">
+                      ⏳ Waiting in queue...
+                    </div>
+                  )}
+
+                  {/* Completed Message */}
+                  {task.status === 'completed' && (
+                    <div className="text-xs text-green-600 font-medium">
+                      ✓ Upload complete
+                    </div>
+                  )}
+
+                  {/* Error Message */}
+                  {task.status === 'failed' && task.error && (
+                    <div className="text-xs text-red-600 mt-1">
+                      Error: {task.error}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Clear Completed Button */}
+          {showUploadPanel && uploadTasks.some(t => t.status === 'completed' || t.status === 'failed') && (
+            <div className="p-3 border-t border-gray-200 bg-gray-50">
+              <button
+                onClick={() => setUploadTasks(prev => prev.filter(t => t.status === 'uploading' || t.status === 'queued'))}
+                className="w-full text-xs text-gray-600 hover:text-gray-800 font-medium transition-colors"
+              >
+                Clear Completed Tasks
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

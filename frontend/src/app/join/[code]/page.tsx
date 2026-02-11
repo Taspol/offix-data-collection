@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { connectSocket, getSocket } from '@/lib/socket';
 import { useSessionStore } from '@/store/sessionStore';
 import RecordingSession from '@/components/RecordingSession';
+import DebugConsole from '@/components/DebugConsole';
 
 export default function JoinPage() {
   const params = useParams();
@@ -83,6 +84,26 @@ export default function JoinPage() {
         console.log('Device update:', data);
         updateConnectionStatus(data.desktopConnected, data.mobileConnected);
         setSessionStatus(data.status);
+      });
+
+      // Handle reconnection
+      socket.on('reconnect', (attemptNumber) => {
+        console.log('🔄 Socket reconnected after', attemptNumber, 'attempts');
+        // Re-join session after reconnection
+        socket.emit('join_session', {
+          sessionId: session.id,
+          deviceType: 'mobile',
+          viewType: 'side',
+          userAgent: navigator.userAgent,
+        });
+      });
+
+      socket.on('disconnect', (reason) => {
+        console.warn('⚠️ Socket disconnected:', reason);
+        if (reason === 'io server disconnect') {
+          // Server disconnected, try to reconnect
+          socket.connect();
+        }
       });
 
       socket.on('next_step_ready', (data) => {
@@ -190,6 +211,7 @@ export default function JoinPage() {
       </div>
 
       <RecordingSession />
+      <DebugConsole enabled={false} />
     </div>
   );
 }
