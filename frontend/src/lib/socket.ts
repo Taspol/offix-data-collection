@@ -14,9 +14,6 @@ export const getSocket = (): Socket => {
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       timeout: 20000,
-      // Keep connection alive during uploads
-      pingInterval: 25000,
-      pingTimeout: 60000,
     });
   }
   return socket;

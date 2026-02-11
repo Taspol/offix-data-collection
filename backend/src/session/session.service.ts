@@ -308,30 +308,39 @@ export class SessionService {
     };
   }
 
-  async getNextPostureStep(sessionId: string): Promise<PostureStep | null> {
+  async getNextPostureStep(
+    sessionId: string,
+    currentPostureLabel?: string,
+  ): Promise<PostureStep | null> {
     // Get all completed postures for this session
+    // Consider a posture complete if recordings are UPLOADING or COMPLETED
     const completedRecordings = await this.recordingRepository
       .createQueryBuilder('recording')
       .select('recording.posture_label')
       .where('recording.session_id = :sessionId', { sessionId })
-      .andWhere('recording.upload_status = :status', { 
-        status: UploadStatus.COMPLETED 
+      .andWhere('recording.upload_status IN (:...statuses)', { 
+        statuses: [UploadStatus.UPLOADING, UploadStatus.COMPLETED]
       })
       .groupBy('recording.posture_label, recording.session_id')
       .having('COUNT(DISTINCT recording.device_type) = 2')
       .getRawMany();
 
     const completedLabels = completedRecordings.map((r) => r.posture_label);
+    
+    // If current posture is provided, also exclude it (even if not yet uploaded)
+    const excludedLabels = currentPostureLabel 
+      ? [...completedLabels, currentPostureLabel]
+      : completedLabels;
 
     // Get next active step not yet completed
     const nextStep = await this.postureStepRepository
       .createQueryBuilder('step')
       .where('step.is_active = true')
       .andWhere(
-        completedLabels.length > 0
-          ? 'step.posture_label NOT IN (:...completed)'
+        excludedLabels.length > 0
+          ? 'step.posture_label NOT IN (:...excluded)'
           : '1=1',
-        { completed: completedLabels },
+        { excluded: excludedLabels },
       )
       .orderBy('step.step_order', 'ASC')
       .getOne();

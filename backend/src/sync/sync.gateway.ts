@@ -396,4 +396,55 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logger.error(`Error confirming re-record: ${error.message}`);
     }
   }
+
+  @SubscribeMessage('request_next_step')
+  async handleRequestNextStep(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { sessionId: string; currentPostureLabel?: string },
+  ) {
+    try {
+      const { sessionId, currentPostureLabel } = payload;
+      
+      // Get the next step for this session, excluding the current one
+      const nextStep = await this.sessionService.getNextPostureStep(
+        sessionId,
+        currentPostureLabel,
+      );
+      
+      if (nextStep) {
+        // Broadcast next step to all devices
+        this.server.to(sessionId).emit('next_step_ready', {
+          step: nextStep,
+        });
+        
+        this.logger.log(`Next step ready for session ${sessionId}: ${nextStep.postureLabel}`);
+      } else {
+        // No more steps available
+        this.server.to(sessionId).emit('next_step_ready', {
+          step: null,
+        });
+        
+        this.logger.log(`No more steps for session ${sessionId}`);
+      }
+    } catch (error) {
+      this.logger.error(`Error requesting next step: ${error.message}`);
+    }
+  }
+
+  @SubscribeMessage('close_guide_modal')
+  handleCloseGuideModal(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { sessionId: string },
+  ) {
+    try {
+      const { sessionId } = payload;
+      
+      // Broadcast to all devices in session to close the guide modal
+      this.server.to(sessionId).emit('close_guide_modal');
+      
+      this.logger.log(`Guide modal closed for session ${sessionId}`);
+    } catch (error) {
+      this.logger.error(`Error closing guide modal: ${error.message}`);
+    }
+  }
 }
