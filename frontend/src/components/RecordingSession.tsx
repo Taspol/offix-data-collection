@@ -152,7 +152,7 @@ export default function RecordingSession() {
         setCurrentDistance(storeDistance);
       }
       
-      // Show guide modal immediately when step changes
+      // Show guide modal when step changes (always show for the new step)
       setShowGuideModal(true);
       setHasSeenGuide(false);
     }
@@ -636,12 +636,8 @@ export default function RecordingSession() {
       }
     });
 
-    // Next step ready
-    socket.on('next_step_ready', (data: { step: any }) => {
-      console.log('➡️ Next step ready:', data.step);
-      setCurrentStep(data.step);
-      setMessage(data.step ? `Next: ${data.step.displayName}` : 'All steps completed!');
-    });
+    // Note: next_step_ready is now handled entirely by desktop/page.tsx
+    // to avoid listener conflicts and ensure proper step index updates
 
     // Listen for guide modal close event from other devices
     socket.on('close_guide_modal', () => {
@@ -865,7 +861,6 @@ export default function RecordingSession() {
     return () => {
       socket.off('start_recording');
       socket.off('stop_recording');
-      socket.off('next_step_ready');
       socket.off('close_guide_modal');
       socket.off('confirm_upload');
       socket.off('confirm_rerecord');
@@ -1329,14 +1324,13 @@ export default function RecordingSession() {
                     setMessage('Uploading...');
                     
                     // Broadcast to all devices to start uploading
+                    // Backend will automatically send next_step_ready after marking as UPLOADING
                     const socket = getSocket();
                     if (socket && sessionId && currentStep) {
-                      socket.emit('confirm_upload', { sessionId });
-                      
-                      // Request next step immediately, passing current step info
-                      socket.emit('request_next_step', { 
+                      socket.emit('confirm_upload', { 
                         sessionId,
-                        currentPostureLabel: currentStep.postureLabel 
+                        postureLabel: currentStep.postureLabel,
+                        distance: currentDistance
                       });
                     }
                   }}

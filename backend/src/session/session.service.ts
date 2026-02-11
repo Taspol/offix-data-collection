@@ -291,14 +291,9 @@ export class SessionService {
       .getRawMany();
 
     // Get total steps and distances
-    // 6 regular postures × 3 distances + 1 freestyle sitting = 19 total recordings
+    // All postures (including freestyle_sitting) × 3 distances = 21 total recordings
     const totalSteps = await this.postureStepRepository.count();
-    const freestyleExists = await this.postureStepRepository.findOne({
-      where: { postureLabel: 'freestyle_sitting' },
-    });
-    
-    const regularPostures = freestyleExists ? totalSteps - 1 : totalSteps;
-    const totalCombinations = regularPostures * 3 + (freestyleExists ? 1 : 0);
+    const totalCombinations = totalSteps * 3;
     const allStepsComplete = completedCombinations.length >= totalCombinations;
 
     return {
@@ -311,41 +306,96 @@ export class SessionService {
   async getNextPostureStep(
     sessionId: string,
     currentPostureLabel?: string,
-  ): Promise<PostureStep | null> {
-    // Get all completed postures for this session
-    // Consider a posture complete if recordings are UPLOADING or COMPLETED
-    const completedRecordings = await this.recordingRepository
+  ): Promise<{ step: PostureStep | null; distance: string }> {
+    console.log(`\n🔍 getNextPostureStep called for session ${sessionId}, currentPostureLabel: ${currentPostureLabel}`);
+    
+    // Get all completed posture+distance combinations for this session
+    // Consider a combination complete if recordings are UPLOADING or COMPLETED
+    const completedCombinations = await this.recordingRepository
       .createQueryBuilder('recording')
-      .select('recording.posture_label')
+      .select(['recording.posture_label', 'recording.distance'])
       .where('recording.session_id = :sessionId', { sessionId })
       .andWhere('recording.upload_status IN (:...statuses)', { 
         statuses: [UploadStatus.UPLOADING, UploadStatus.COMPLETED]
       })
-      .groupBy('recording.posture_label, recording.session_id')
+      .groupBy('recording.posture_label, recording.distance')
       .having('COUNT(DISTINCT recording.device_type) = 2')
       .getRawMany();
 
-    const completedLabels = completedRecordings.map((r) => r.posture_label);
-    
-    // If current posture is provided, also exclude it (even if not yet uploaded)
-    const excludedLabels = currentPostureLabel 
-      ? [...completedLabels, currentPostureLabel]
-      : completedLabels;
+    console.log('📊 Completed combinations:', JSON.stringify(completedCombinations, null, 2));
 
-    // Get next active step not yet completed
-    const nextStep = await this.postureStepRepository
-      .createQueryBuilder('step')
-      .where('step.is_active = true')
-      .andWhere(
-        excludedLabels.length > 0
-          ? 'step.posture_label NOT IN (:...excluded)'
-          : '1=1',
-        { excluded: excludedLabels },
-      )
-      .orderBy('step.step_order', 'ASC')
+    // Get the current distance from the most recent recording
+    const latestRecording = await this.recordingRepository
+      .createQueryBuilder('recording')
+      .where('recording.session_id = :sessionId', { sessionId })
+      .orderBy('recording.created_at', 'DESC')
       .getOne();
 
-    return nextStep;
+    const currentDistance = latestRecording?.distance || 'nom';
+    console.log(`📏 Current distance: ${currentDistance} (from latest recording: ${latestRecording?.postureLabel})`);
+    
+    // Get all posture steps
+    const allSteps = await this.postureStepRepository.find({
+      where: { isActive: true },
+      order: { stepOrder: 'ASC' },
+    });
+    
+    console.log(`📝 All posture steps: ${allSteps.map(s => s.postureLabel).join(', ')}`);
+    
+    // Find completed posture labels at current distance
+    const completedAtCurrentDistance = completedCombinations
+      .filter(c => c.recording_distance === currentDistance)
+      .map(c => c.posture_label);
+    
+    console.log(`✅ Completed at ${currentDistance}: [${completedAtCurrentDistance.join(', ')}]`);
+    
+    // If current posture is provided, also exclude it from current distance
+    const excludedAtCurrentDistance = currentPostureLabel
+      ? [...completedAtCurrentDistance, currentPostureLabel]
+      : completedAtCurrentDistance;
+    
+    console.log(`🚫 Excluded at ${currentDistance}: [${excludedAtCurrentDistance.join(', ')}]`);
+    
+    // Find next step at current distance
+    const nextStepAtCurrentDistance = allSteps.find(
+      step => !excludedAtCurrentDistance.includes(step.postureLabel)
+    );
+    
+    console.log(`➡️ Next step at ${currentDistance}: ${nextStepAtCurrentDistance?.postureLabel || 'NONE'}`);
+    
+    if (nextStepAtCurrentDistance) {
+      return { step: nextStepAtCurrentDistance, distance: currentDistance };
+    }
+    
+    // No more steps at current distance, move to next distance
+    const totalSteps = allSteps.length;
+    const completedAtNom = completedCombinations.filter(c => c.recording_distance === 'nom').length;
+    const completedAtClose = completedCombinations.filter(c => c.recording_distance === 'close').length;
+    const completedAtFar = completedCombinations.filter(c => c.recording_distance === 'far').length;
+    
+    console.log(`📈 Distance completion - NOM: ${completedAtNom}/${totalSteps}, CLOSE: ${completedAtClose}/${totalSteps}, FAR: ${completedAtFar}/${totalSteps}`);
+    
+    if (currentDistance === 'nom' && completedAtNom >= totalSteps) {
+      // Move to close distance - return first step
+      console.log(`🎯 All postures completed at NOM! Moving to CLOSE distance with ${allSteps[0].postureLabel}`);
+      return { step: allSteps[0], distance: 'close' };
+    }
+    
+    if (currentDistance === 'close' && completedAtClose >= totalSteps) {
+      // Move to far distance - return first step
+      console.log(`🎯 All postures completed at CLOSE! Moving to FAR distance with ${allSteps[0].postureLabel}`);
+      return { step: allSteps[0], distance: 'far' };
+    }
+    
+    if (currentDistance === 'far' && completedAtFar >= totalSteps) {
+      // All steps at all distances complete
+      console.log(`🏁 All postures at all distances completed!`);
+      return { step: null, distance: currentDistance };
+    }
+    
+    // Fallback: return first step at current distance
+    console.log(`⚠️ Fallback: returning ${allSteps[0].postureLabel} at ${currentDistance}`);
+    return { step: allSteps[0], distance: currentDistance };
   }
 
   async getAllPostureSteps(): Promise<PostureStep[]> {
@@ -359,6 +409,30 @@ export class SessionService {
     return this.recordingRepository.find({
       where: { sessionId },
       order: { createdAt: 'ASC' },
+    });
+  }
+
+  async getPendingRecordingsForSession(sessionId: string): Promise<Recording[]> {
+    return this.recordingRepository.find({
+      where: { 
+        sessionId,
+        uploadStatus: UploadStatus.PENDING 
+      },
+    });
+  }
+
+  async getPendingRecordingsForPostureDistance(
+    sessionId: string,
+    postureLabel: string,
+    distance: string,
+  ): Promise<Recording[]> {
+    return this.recordingRepository.find({
+      where: { 
+        sessionId,
+        postureLabel,
+        distance,
+        uploadStatus: UploadStatus.PENDING 
+      },
     });
   }
 }

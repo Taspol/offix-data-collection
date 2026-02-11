@@ -21,23 +21,24 @@ export class PostureController {
 
   @Get(':sessionId/next')
   async getNextPosture(@Param('sessionId') sessionId: string) {
-    const step = await this.sessionService.getNextPostureStep(sessionId);
+    const result = await this.sessionService.getNextPostureStep(sessionId);
     
-    if (!step) {
+    if (!result.step) {
       return { completed: true, step: null };
     }
 
     return {
       completed: false,
       step: {
-        id: step.id,
-        stepOrder: step.stepOrder,
-        postureLabel: step.postureLabel,
-        displayName: step.displayName,
-        instructions: step.instructions,
-        countdownSeconds: step.countdownSeconds,
-        recordingDurationSeconds: step.recordingDurationSeconds,
+        id: result.step.id,
+        stepOrder: result.step.stepOrder,
+        postureLabel: result.step.postureLabel,
+        displayName: result.step.displayName,
+        instructions: result.step.instructions,
+        countdownSeconds: result.step.countdownSeconds,
+        recordingDurationSeconds: result.step.recordingDurationSeconds,
       },
+      distance: result.distance,
     };
   }
 }

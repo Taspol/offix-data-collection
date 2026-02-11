@@ -16,6 +16,7 @@ export default function DesktopPage() {
   const [allSteps, setAllSteps] = useState<PostureStep[]>([]);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [currentDistance, setCurrentDistance] = useState<'nom' | 'close' | 'far'>('nom');
+  const [renderTrigger, setRenderTrigger] = useState(0); // Force re-render counter
   const stepIndexRef = useRef(0); // Track step index for event handlers
   const distanceRef = useRef<'nom' | 'close' | 'far'>('nom');
   const autoProgressTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -41,7 +42,9 @@ export default function DesktopPage() {
   } = useSessionStore();
 
   const bothConnected = desktopConnected && mobileConnected;
-  const canStartRecording = bothConnected && sessionStatus === 'READY' && !loading;
+  // Allow recording as long as devices are connected and not currently recording
+  // Background uploads don't block new recordings
+  const canStartRecording = bothConnected && !loading;
 
   // Create session on mount
   useEffect(() => {
@@ -145,19 +148,6 @@ export default function DesktopPage() {
         setSessionStatus('READY');
       });
 
-      socket.on('next_step_ready', (data: { step: any }) => {
-        console.log('➡️ Next step ready:', data.step);
-        if (data.step) {
-          // Update currentStepIndex to match the new step
-          const newStepIndex = allSteps.findIndex(s => s.id === data.step.id);
-          if (newStepIndex !== -1) {
-            console.log(`Updating step index from ${stepIndexRef.current} to ${newStepIndex}`);
-            stepIndexRef.current = newStepIndex;
-            setCurrentStepIndex(newStepIndex);
-          }
-        }
-      });
-
       socket.on('error', (error) => {
         console.error('Socket error:', error);
         alert(error.message);
@@ -250,27 +240,51 @@ export default function DesktopPage() {
     }
   };
 
-  // Auto-progress to next step when upload completes
+  // Listen for next_step_ready event to update current step index
   useEffect(() => {
-    if (sessionStatus === 'UPLOAD_COMPLETE' && stepIndexRef.current < allSteps.length) {
-      // Clear any existing timeout
-      if (autoProgressTimeoutRef.current) {
-        clearTimeout(autoProgressTimeoutRef.current);
-      }
-      
-      // Automatically move to next step after 2 seconds
-      autoProgressTimeoutRef.current = setTimeout(() => {
-        console.log('Auto-progressing to next step...');
-        moveToNextStep();
-      }, 2000);
-    }
+    if (!isConnected || allSteps.length === 0) return;
 
-    return () => {
-      if (autoProgressTimeoutRef.current) {
-        clearTimeout(autoProgressTimeoutRef.current);
+    const socket = getSocket();
+
+    const handleNextStepReady = (data: { step: any; distance: string }) => {
+      console.log('➡️ Next step ready EVENT RECEIVED:', data.step?.postureLabel, 'at distance:', data.distance);
+      
+      if (data.step && allSteps.length > 0) {
+        const newStepIndex = allSteps.findIndex(s => s.id === data.step.id);
+        if (newStepIndex !== -1) {
+          const newDistance = data.distance as 'nom' | 'close' | 'far';
+          
+          console.log(`🔄 UPDATING: step ${stepIndexRef.current} → ${newStepIndex}, distance ${distanceRef.current} → ${newDistance}`);
+          
+          // Update everything at once
+          stepIndexRef.current = newStepIndex;
+          distanceRef.current = newDistance;
+          setCurrentStepIndex(newStepIndex);
+          setCurrentStep(data.step);
+          setCurrentDistance(newDistance);
+          setStoreDistance(newDistance);
+          setSessionStatus('READY');
+          setRenderTrigger(prev => prev + 1);
+          
+          console.log(`✅ UPDATED: Now on ${data.step.postureLabel} at ${newDistance}`);
+        } else {
+          console.error('❌ Step not found in allSteps:', data.step);
+        }
+      } else if (!data.step) {
+        console.log('🏁 All steps completed');
+        setSessionStatus('COMPLETED');
       }
     };
-  }, [sessionStatus, allSteps.length]);
+
+    socket.on('next_step_ready', handleNextStepReady);
+
+    return () => {
+      socket.off('next_step_ready', handleNextStepReady);
+    };
+  }, [isConnected, allSteps, setCurrentStep, setStoreDistance, setSessionStatus]);
+
+  // Note: Step progression is now handled by the backend via 'next_step_ready' event
+  // No need for auto-progression useEffect anymore
 
   if (!sessionId || !isConnected) {
     return (
@@ -409,41 +423,78 @@ export default function DesktopPage() {
               {loading ? 'Recording...' : `Start Recording (${currentStep?.recordingDurationSeconds}s)`}
             </button>
 
-            {/* Auto-progressing message (after upload completes) */}
-            {sessionStatus === 'UPLOAD_COMPLETE' && (
-              <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
-                <div className="flex items-center justify-center gap-2 text-green-800 mb-2">
-                  <svg className="w-5 h-5 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
-                  <span className="font-medium">Upload Complete!</span>
-                </div>
-                <p className="text-sm text-green-700">Moving to next step...</p>
-              </div>
-            )}
-
             {/* Steps List */}
-            <div className="mt-6">
+            <div className="mt-6" key={`steps-${renderTrigger}`}>
               <h3 className="font-semibold mb-3">All Steps:</h3>
               <div className="space-y-2">
-                {allSteps.map((step, index) => (
-                  <div
-                    key={step.id}
-                    className={`p-3 rounded-lg text-sm ${
-                      index === currentStepIndex
-                        ? 'bg-primary-100 border-2 border-primary-600'
-                        : index < currentStepIndex
-                        ? 'bg-green-50 border border-green-300'
-                        : 'bg-gray-50 border border-gray-200'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium">{step.displayName}</span>
-                      {index < currentStepIndex && <span className="text-green-600">✓</span>}
-                      {index === currentStepIndex && <span className="text-primary-600">→</span>}
+                {allSteps.map((step, index) => {
+                  // Use refs for immediate updates (refs are synchronous, state is async)
+                  const activeDistanceIndex = distances.indexOf(distanceRef.current);
+                  const activeStepIndex = stepIndexRef.current;
+                  
+                  // Calculate overall progress
+                  const overallCurrentIndex = activeDistanceIndex * allSteps.length + activeStepIndex;
+                  const stepAtNom = index;
+                  const stepAtClose = allSteps.length + index;
+                  const stepAtFar = 2 * allSteps.length + index;
+                  
+                  // Determine if this step is completed, current, or upcoming at each distance
+                  const isCurrentAtNom = activeDistanceIndex === 0 && index === activeStepIndex;
+                  const isCurrentAtClose = activeDistanceIndex === 1 && index === activeStepIndex;
+                  const isCurrentAtFar = activeDistanceIndex === 2 && index === activeStepIndex;
+                  
+                  const isCompletedAtNom = activeDistanceIndex > 0 || (activeDistanceIndex === 0 && index < activeStepIndex);
+                  const isCompletedAtClose = activeDistanceIndex > 1 || (activeDistanceIndex === 1 && index < activeStepIndex);
+                  const isCompletedAtFar = activeDistanceIndex === 2 && index < activeStepIndex;
+                  
+                  const isCurrent = isCurrentAtNom || isCurrentAtClose || isCurrentAtFar;
+                  
+                  return (
+                    <div key={`${step.id}-${renderTrigger}`} className="space-y-1">
+                      <div className="text-xs font-semibold text-gray-600 uppercase">{step.displayName}</div>
+                      <div className="grid grid-cols-3 gap-1">
+                        {/* NOM */}
+                        <div className={`p-2 rounded text-xs text-center ${
+                          isCurrentAtNom
+                            ? 'bg-primary-100 border-2 border-primary-600 font-semibold'
+                            : isCompletedAtNom
+                            ? 'bg-green-50 border border-green-300'
+                            : 'bg-gray-50 border border-gray-200'
+                        }`}>
+                          {isCompletedAtNom && <span className="text-green-600">✓ </span>}
+                          {isCurrentAtNom && <span className="text-primary-600">→ </span>}
+                          NOM
+                        </div>
+                        
+                        {/* CLOSE */}
+                        <div className={`p-2 rounded text-xs text-center ${
+                          isCurrentAtClose
+                            ? 'bg-primary-100 border-2 border-primary-600 font-semibold'
+                            : isCompletedAtClose
+                            ? 'bg-green-50 border border-green-300'
+                            : 'bg-gray-50 border border-gray-200'
+                        }`}>
+                          {isCompletedAtClose && <span className="text-green-600">✓ </span>}
+                          {isCurrentAtClose && <span className="text-primary-600">→ </span>}
+                          CLOSE
+                        </div>
+                        
+                        {/* FAR */}
+                        <div className={`p-2 rounded text-xs text-center ${
+                          isCurrentAtFar
+                            ? 'bg-primary-100 border-2 border-primary-600 font-semibold'
+                            : isCompletedAtFar
+                            ? 'bg-green-50 border border-green-300'
+                            : 'bg-gray-50 border border-gray-200'
+                        }`}>
+                          {isCompletedAtFar && <span className="text-green-600">✓ </span>}
+                          {isCurrentAtFar && <span className="text-primary-600">→ </span>}
+                          FAR
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>

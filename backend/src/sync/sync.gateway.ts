@@ -349,15 +349,60 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('confirm_upload')
-  handleConfirmUpload(
+  async handleConfirmUpload(
     @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { sessionId: string },
+    @MessageBody() payload: { sessionId: string; postureLabel?: string; distance?: string },
   ) {
     try {
-      const { sessionId } = payload;
+      const { sessionId, postureLabel, distance } = payload;
+      
+      // Get PENDING recordings for this specific posture+distance and mark as UPLOADING
+      let pendingRecordings: any[];
+      if (postureLabel && distance) {
+        pendingRecordings = await this.sessionService.getPendingRecordingsForPostureDistance(
+          sessionId,
+          postureLabel,
+          distance,
+        );
+      } else {
+        // Fallback: mark all pending recordings
+        pendingRecordings = await this.sessionService.getPendingRecordingsForSession(sessionId);
+      }
+      
+      for (const recording of pendingRecordings) {
+        await this.sessionService.updateRecordingUploadStatus(
+          recording.id,
+          UploadStatus.UPLOADING,
+        );
+      }
+      
+      this.logger.log(`Marked ${pendingRecordings.length} recordings as UPLOADING for session ${sessionId} (${postureLabel} at ${distance})`);
       
       // Broadcast to all devices in session (including the sender)
       this.server.to(sessionId).emit('confirm_upload');
+      
+      // After marking as UPLOADING, automatically get and broadcast next step
+      // Pass the current posture to exclude it from next step calculation
+      const result = await this.sessionService.getNextPostureStep(
+        sessionId,
+        postureLabel,
+      );
+      
+      if (result.step) {
+        this.server.to(sessionId).emit('next_step_ready', {
+          step: result.step,
+          distance: result.distance,
+        });
+        
+        this.logger.log(`Next step ready after upload: ${result.step.postureLabel} at ${result.distance}`);
+      } else {
+        this.server.to(sessionId).emit('next_step_ready', {
+          step: null,
+          distance: result.distance,
+        });
+        
+        this.logger.log(`No more steps after upload for session ${sessionId}`);
+      }
       
       this.logger.log(`Upload confirmed for session ${sessionId}`);
     } catch (error) {
@@ -406,22 +451,24 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const { sessionId, currentPostureLabel } = payload;
       
       // Get the next step for this session, excluding the current one
-      const nextStep = await this.sessionService.getNextPostureStep(
+      const result = await this.sessionService.getNextPostureStep(
         sessionId,
         currentPostureLabel,
       );
       
-      if (nextStep) {
-        // Broadcast next step to all devices
+      if (result.step) {
+        // Broadcast next step and distance to all devices
         this.server.to(sessionId).emit('next_step_ready', {
-          step: nextStep,
+          step: result.step,
+          distance: result.distance,
         });
         
-        this.logger.log(`Next step ready for session ${sessionId}: ${nextStep.postureLabel}`);
+        this.logger.log(`Next step ready for session ${sessionId}: ${result.step.postureLabel} at ${result.distance}`);
       } else {
         // No more steps available
         this.server.to(sessionId).emit('next_step_ready', {
           step: null,
+          distance: result.distance,
         });
         
         this.logger.log(`No more steps for session ${sessionId}`);
