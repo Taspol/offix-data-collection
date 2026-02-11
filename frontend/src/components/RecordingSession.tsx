@@ -1045,7 +1045,7 @@ export default function RecordingSession() {
       {/* Side View Preview (Desktop Only) */}
       {deviceType === 'desktop' && (
         <div>
-          <h3 className="text-lg font-semibold mb-3">Side View (Mobile Device)</h3>
+          <h3 className="text-lg font-semibold mb-1">Side View (Mobile Device)</h3>
           <div className="relative bg-gray-900 rounded-lg overflow-hidden" style={{ aspectRatio: '16/9' }}>
             <video
               ref={remoteVideoRef}
