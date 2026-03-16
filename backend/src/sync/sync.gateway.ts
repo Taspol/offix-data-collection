@@ -41,6 +41,15 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(SyncGateway.name);
   private deviceSockets: Map<string, { sessionId: string; deviceId: string }> = new Map();
 
+  private getUtc7Timestamp(): string {
+    const utc7 = new Date(Date.now() + 7 * 60 * 60 * 1000);
+    return utc7.toISOString().replace('Z', '+07:00');
+  }
+
+  private logWithUtc7(message: string): void {
+    this.logger.log(`[UTC+7 ${this.getUtc7Timestamp()}] ${message}`);
+  }
+
   constructor(private readonly sessionService: SessionService) {}
 
   async handleConnection(client: Socket) {
@@ -143,6 +152,9 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     try {
       const { sessionId, postureLabel, distance, duration } = payload;
+      this.logWithUtc7(
+        `START_RECORDING received: session=${sessionId}, posture=${postureLabel}, distance=${distance}, durationMs=${duration}`,
+      );
 
       // Update session status
       await this.sessionService.updateSessionStatus(sessionId, SessionStatus.RECORDING);
@@ -178,7 +190,9 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
         recordings,
       });
 
-      this.logger.log(`Started recording for session ${sessionId}: ${postureLabel}`);
+      this.logWithUtc7(
+        `START_RECORDING broadcasted: session=${sessionId}, posture=${postureLabel}, distance=${distance}, timestamp=${timestamp}, devices=${recordings.length}`,
+      );
     } catch (error) {
       this.logger.error(`Error starting recording: ${error.message}`);
       client.emit('error', {
@@ -196,6 +210,7 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       const { sessionId } = payload;
       const timestamp = Date.now();
+      this.logWithUtc7(`STOP_RECORDING received: session=${sessionId}`);
 
       // Update session status
       await this.sessionService.updateSessionStatus(sessionId, SessionStatus.UPLOADING);
@@ -205,7 +220,9 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
         timestamp,
       });
 
-      this.logger.log(`Stopped recording for session ${sessionId}`);
+      this.logWithUtc7(
+        `STOP_RECORDING broadcasted: session=${sessionId}, timestamp=${timestamp}`,
+      );
     } catch (error) {
       this.logger.error(`Error stopping recording: ${error.message}`);
       client.emit('error', {
