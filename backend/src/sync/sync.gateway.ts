@@ -9,6 +9,8 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
+import { appendFile, mkdir } from 'fs/promises';
+import { dirname, resolve } from 'path';
 import { SessionService } from '../session/session.service';
 import { DeviceType, ViewType } from '../entities/device.entity';
 import { UploadStatus } from '../entities/recording.entity';
@@ -40,6 +42,8 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   private readonly logger = new Logger(SyncGateway.name);
   private deviceSockets: Map<string, { sessionId: string; deviceId: string }> = new Map();
+  private readonly csvLogPath = resolve(process.cwd(), 'logs', 'recording-events.csv');
+  private csvHeaderWritten = false;
 
   private getUtc7Timestamp(): string {
     const utc7 = new Date(Date.now() + 7 * 60 * 60 * 1000);
@@ -48,6 +52,53 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   private logWithUtc7(message: string): void {
     this.logger.log(`[UTC+7 ${this.getUtc7Timestamp()}] ${message}`);
+  }
+
+  private csvEscape(value: string | number | null | undefined): string {
+    const str = String(value ?? '');
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  }
+
+  private async appendRecordingEventCsv(row: {
+    eventType: string;
+    sessionId: string;
+    postureLabel?: string;
+    distance?: string;
+    durationMs?: number;
+    timestampMs: number;
+    socketId?: string;
+    note?: string;
+  }): Promise<void> {
+    try {
+      await mkdir(dirname(this.csvLogPath), { recursive: true });
+
+      if (!this.csvHeaderWritten) {
+        const header =
+          'timestamp_utc7,timestamp_ms,event_type,session_id,posture_label,distance,duration_ms,socket_id,note\n';
+        await appendFile(this.csvLogPath, header, { encoding: 'utf8' });
+        this.csvHeaderWritten = true;
+      }
+
+      const line = [
+        this.csvEscape(this.getUtc7Timestamp()),
+        this.csvEscape(row.timestampMs),
+        this.csvEscape(row.eventType),
+        this.csvEscape(row.sessionId),
+        this.csvEscape(row.postureLabel),
+        this.csvEscape(row.distance),
+        this.csvEscape(row.durationMs),
+        this.csvEscape(row.socketId),
+        this.csvEscape(row.note),
+      ].join(',');
+
+      await appendFile(this.csvLogPath, `${line}\n`, { encoding: 'utf8' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Failed to write recording CSV log: ${message}`);
+    }
   }
 
   constructor(private readonly sessionService: SessionService) {}
@@ -152,9 +203,19 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     try {
       const { sessionId, postureLabel, distance, duration } = payload;
+      const eventTimestamp = Date.now();
       this.logWithUtc7(
         `START_RECORDING received: session=${sessionId}, posture=${postureLabel}, distance=${distance}, durationMs=${duration}`,
       );
+      await this.appendRecordingEventCsv({
+        eventType: 'START_RECORDING_RECEIVED',
+        sessionId,
+        postureLabel,
+        distance,
+        durationMs: duration,
+        timestampMs: eventTimestamp,
+        socketId: client.id,
+      });
 
       // Update session status
       await this.sessionService.updateSessionStatus(sessionId, SessionStatus.RECORDING);
@@ -193,6 +254,16 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logWithUtc7(
         `START_RECORDING broadcasted: session=${sessionId}, posture=${postureLabel}, distance=${distance}, timestamp=${timestamp}, devices=${recordings.length}`,
       );
+      await this.appendRecordingEventCsv({
+        eventType: 'START_RECORDING_BROADCASTED',
+        sessionId,
+        postureLabel,
+        distance,
+        durationMs: duration,
+        timestampMs: timestamp,
+        socketId: client.id,
+        note: `devices=${recordings.length}`,
+      });
     } catch (error) {
       this.logger.error(`Error starting recording: ${error.message}`);
       client.emit('error', {
@@ -211,6 +282,12 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const { sessionId } = payload;
       const timestamp = Date.now();
       this.logWithUtc7(`STOP_RECORDING received: session=${sessionId}`);
+      await this.appendRecordingEventCsv({
+        eventType: 'STOP_RECORDING_RECEIVED',
+        sessionId,
+        timestampMs: timestamp,
+        socketId: client.id,
+      });
 
       // Update session status
       await this.sessionService.updateSessionStatus(sessionId, SessionStatus.UPLOADING);
@@ -223,6 +300,12 @@ export class SyncGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logWithUtc7(
         `STOP_RECORDING broadcasted: session=${sessionId}, timestamp=${timestamp}`,
       );
+      await this.appendRecordingEventCsv({
+        eventType: 'STOP_RECORDING_BROADCASTED',
+        sessionId,
+        timestampMs: timestamp,
+        socketId: client.id,
+      });
     } catch (error) {
       this.logger.error(`Error stopping recording: ${error.message}`);
       client.emit('error', {
